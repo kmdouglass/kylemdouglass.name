@@ -1,0 +1,368 @@
+#+TITLE: Request a TLS Certificate and Create a CloudFront Distribution for a Static Website
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2020-09-18
+#+EMAIL: kyle.m.douglass@gmail.com
+#+OPTIONS: ^:nil
+
+#+BEGIN_ABSTRACT
+We discuss how to request a TLS certificate for our static website. In addition, we set up a
+Cloudfront Distribution to enable =https= access to our site.
+#+END_ABSTRACT
+
+* HTTPS for a static website on AWS
+
+HTTP over SSL/TLS, or HTTPS, is a secure form of HTTP whereby HTTP requests and responses are
+encrypted before being sent across a network. When you type a URL into a web browser that starts
+with =https://=, you are using HTTPS to communicate with a web server.
+
+HTTPS is important for the modern web for a few reasons:
+
+1. It provides encryption for e-commerce and privacy-sensitive websites. Without it, attackers
+   could easily obtain private information (such as credit card numbers) that is passed between a
+   client and server.
+2. HTTPS allows clients to know that a website belongs to a trusted party and is not an impostor.
+3. [[https://webmasters.googleblog.com/2014/08/https-as-ranking-signal.html][Some search providers such as Google give preference to sites using HTTPS in search results.]]
+
+Enabling HTTPS for our website means that we can reach it by entering the address
+https://www.kponics.com into our browser's address bar. But to do that, we must first obtain a TLS
+certificate. With our certificate in hand, [[https://docs.aws.amazon.com/AmazonS3/latest/dev/website-hosting-custom-domain-walkthrough.html][we must next create a AWS CloudFront distribution]]. AWS
+CloudFront is a content delivery network (CDN) that speeds up the delivery of files with filetypes
+such as .html, .css, and others to clients by distributing the files to data centers around the
+globe and serving them from to clients that are located within a close proximity to the data
+centers. CloudFront is required by AWS if we want to use HTTPS with our static website that is
+hosted on S3; a CDN is not in general necessary to enable HTTPS on a website.
+
+This report will cover TLS certificate creation and the configuration of CloudFront, all using
+Terraform as before.
+
+* Create a TLS certificate with the AWS Certificate Manager
+
+** Subject alternative names
+
+When we create a TLS certificate, we have the opportunity to select the domain names that we wish
+to protect. The Terraform resource [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/acm_certificate][acm_certificate]] is used to create TLS certificates. There are
+two arguments that determine the domain names that we want to protect: =domain_name= and
+=subject_alternative_names=.
+
+According to [[https://support.dnsimple.com/articles/what-is-ssl-san/][dnssimple]],
+
+#+BEGIN_QUOTE
+The Subject Alternative Name (SAN) is an extension to the X.509 specification that allows users to
+specify additional host names for a single SSL certificate.
+#+END_QUOTE
+
+** Create the certificate
+
+Create a file called =tls_certificate.tf= and add the following:
+
+#+BEGIN_SRC
+resource "aws_acm_certificate" "cert" {
+  domain_name               = "kponics.com"
+  subject_alternative_names = ["*.kponics.com"]
+  validation_method         = "DNS"
+
+  tags = {
+    Name      = "kponics.com"
+    Terraform = "true"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_acm_certificate_validation" "cert-validation" {
+  certificate_arn = aws_acm_certificate.cert.arn
+}
+#+END_SRC
+
+This will create a certificate to protect =kponics.com=, as well as all of its subdomains. As a
+validation method, we have chosen the option =DNS=. (There is more about this below.) The last
+important thing to note is that we have used a lifecycle block, setting =create_before_destroy =
+true=. This is recommended in the Terraform documentation to avoid destroying a certificate that is
+a use without having another one ready.
+
+The =aws_acm_certificate_validation= resource type is used to tell Terraform to wait until the
+certificate is valid before finishing an apply operation. When applying the changes through
+Terraform, we should at some point be able to see the the certificate become available in the AWS
+web console. We can find it by navigating to the Amazon Certificate Manager (ACM) service. In our
+case, after running =terraform apply=, there should be a certificate whose name is
+=kponics.com=. Upon expanding the information available for the certificate, we should be met by a
+block of text that states that validation of the certificate is not yet complete.
+
+We need to proceed to the next up and validate the certificate to finish the apply.
+
+** Validate the certificate
+
+In this the section, we more-or-less follow the procedure described at
+https://dev.to/namuny/integrating-aws-cloudfront-with-third-party-domain-provider-2ce3.
+
+To validate the certificate means that we will to prove to AWS that we own the domain. Since we
+have chosen =DNS= as our validation method, we need to configure the DNS settings in Namecheap, our
+domain name provider.
+
+In the web console, we should see two domains that are pending validation: =kponics.com= and
+=*.kponics.com=. If we expand the information box that is associated with each domain, then we
+should see CNAME records that we need to configure in Namecheap to validate the certificate. Make
+note of these records, then navigate to the Namecheap administration panel. Go to the =Advanced DNS
+Settings= for our domain.
+
+At this point, we need to create a CNAME record in Namecheap, but what do we set as values for the
+settings? When creating a new CNAME record, there are two values to concern ourselves with:
+
+- host
+- value
+
+The values that we need to enter here correspond to the name and value fields for the domains in
+the ACM. Let's explain what to do here through an example. In the ACM, let's say that we have a
+name that is =_randomstring.kponics.com.=. In the host field of the new CNAME record on the
+Namecheap Advanced DNS Settings page, we need to enter the value =_randomstring=. The value for the
+value field can be copied and pasted directly from the ACM page to the Namecheap DNS page.
+
+We only need to add one CNAME record because they are the same name/values for all of the domains
+on the certificate. When we are done adding the CNAME record, save the changes.  The validation may
+take a few minutes, but when it is done, you will see that the certificate has been validated in
+the AWS web console. You will also be able to query the name with =dig=:
+
+#+BEGIN_SRC sh
+dig cname FULL_NAME_FROM_ACM
+#+END_SRC
+
+If everything is configured correctly, then we should see the value from the ACM page in the
+=ANSWER SECTION= of the response. The =terraform apply= operation from the previous step should
+also finish.
+
+* Create a CloudFront distribution
+
+[[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_distribution][It is somewhat of an exercise to create a CloudFront distribution with Terraform.]] The difficulty is
+not in actually creating the distribution, but rather in its configuration because there are many
+settings. Fortunately, we can rely on the Terraform and AWS documentation here to explain
+everything.
+
+Create a new file inside the infra folder that is called =cloudfront.tf=. Add the following
+resources:
+
+#+BEGIN_SRC
+resource "aws_cloudfront_origin_access_identity" "origin_access_identity" {}
+
+resource "aws_cloudfront_distribution" "kponics-distribution" {
+  origin {
+    domain_name = aws_s3_bucket.kponics-bucket.bucket_regional_domain_name
+    origin_id   = var.kponics_cloudfront_origin_id
+
+    s3_origin_config {
+      origin_access_identity = aws_cloudfront_origin_access_identity.origin-access-identity.cloudfront_access_identity_path
+    }
+  }
+
+  enabled             = true
+  is_ipv6_enabled     = true
+  comment             = "kponics.com"
+  default_root_object = "index.html"
+
+  logging_config {
+    bucket          = aws_s3_bucket.kponics-distribution-logs-bucket.bucket_domain_name
+  }
+
+  aliases = ["kponics.com", "www.kponics.com"]
+
+  default_cache_behavior {
+    allowed_methods  = ["GET", "HEAD", "OPTIONS"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = var.kponics_cloudfront_origin_id
+
+    forwarded_values {
+      query_string = false
+
+      cookies {
+        forward = "none"
+      }
+    }
+
+    viewer_protocol_policy = "redirect-to-https"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+  }
+
+  price_class = "PriceClass_100"
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  tags = {
+    Name      = "kponics.com CloudFront Distribution"
+    Terraform = "true"
+  }
+
+  viewer_certificate {
+    acm_certificate_arn = aws_acm_certificate.cert.arn
+    ssl_support_method  = "sni-only"
+  }
+}
+#+END_SRC
+
+The first resource creates an origin access identity. [[https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html][An origin access identity (OAI) is a special
+user]] that is used to restrict access to content within a CloudFront distribution. With this user,
+we can ensure the others can only access our content through the CloudFront distribution and not
+via the S3 bucket.
+
+The second resource defines the CloudFront distribution itself. Here's an explanation of its
+configuration:
+
+** origin
+
+=domain_name= is the DNS of our S3 bucket that holds our static content. The =origin_id= is [[https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/distribution-web-values-specify.html#DownloadDistValuesId][a
+string that uniquely identifies this origin]]. We also assign the OAI to the distribution in this
+sub-resource.
+
+** logging_config
+
+[[https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/AccessLogs.html][We can persist the access logs from our distribution to a S3 bucket]]. To do this, we first need to
+create a bucket to hold the logs. Inside =buckets.tf=, add the following Terraform configuration:
+
+#+BEGIN_SRC
+resource "aws_s3_bucket" "kponics-distribution-logs-bucket" {
+  bucket = var.kponics_distribution_logs_bucket
+  acl    = "private"
+
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
+    }
+  }
+
+  tags = {
+    Name      = "kponics.com Distribution Logs"
+    Terraform = "true"
+  }
+}
+#+END_SRC
+
+We shouldn't need to change the permissions on the bucket because [[https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/AccessLogs.html#access-logs-choosing-s3-bucket][the documentation states that the
+account that owns the distribution needs FULL_CONTROL over the bucket]], which is the default if the
+bucket and the distribution are in the same account.
+
+After adding the bucket, we simply refer to it in the =logging_config=.
+
+** default_cache_behavior
+
+=viewer_protocol_policy = "redirect-to-https"= indicates that http requests for content should be
+redirected to https requests. The other options should be fairly straightforward, but if they are
+not, then the [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_distribution][Terraform documentation]] is a good starting point for learning more.
+
+** price_class
+
+The price class determines the maximum amount that we might be charged by AWS for using the
+CloudFront service. It also determines the edge locations from which CloudFront will deliver
+content. Since we're just getting started, let's set the price class to 100. [[https://aws.amazon.com/cloudfront/pricing/][This means that our
+content will only be served from the United States, Canada, Europe, and Israel edge locations.]]
+
+** restrictions
+
+The restrictions sub-resource allows us to control to where our content is distributed. Since we
+don't want to restrict anyone from viewing our site, we have set the restriction type to =none= in
+the =geo_restriction= sub-resource.
+
+** viewer_certificate
+
+This setting is used to instruct the distribution to use our new TLS certificate. This is done with
+the option =acm_certificate_arn=, where we set the value to the ARN of the certificate that we
+previously created.
+
+[[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_distribution#ssl_support_method][According to the Terraform documentation]], we must specify a value for the =ssl_support_method=
+argument because we have used the =acm_certificate_arn= argument. Here we set the value to
+=sni-only=. SNI stands for Server Name Indication.
+
+* Modify the CNAME record to point to the CloudFront distribution and add an ALIAS record
+
+Let's go ahead and =terraform apply= to create the CloudFront distribution.
+
+Once created, we need to create a CNAME record that points from our domain name to our CloudFront
+distribution. To do this, we navigate to the CloudFront service page in the AWS web console. On the
+service page, select the distribution by the link in the ID column. In the detail page that
+appears, there should be an entry titled =Domain Name=. We need to create a CNAME record that
+points to this inside the Namecheap DNS settings.
+
+First, we can test the distribution by navigating to the CloudFront URL in our browser. 
+
+Next, return to the DNS settings for our domain. Edit the current CNAME record that points to the
+S3 bucket with the =www= host and change it to point to our CloudFront URL. In addition, change the
+current CNAME record with the =@= host and change it to an =ALIAS Record= that points to the
+CloudFront distribution. [[https://www.namecheap.com/support/knowledgebase/article.aspx/10128/2237/how-to-create-an-alias-record][An ALIAS record is necessary to redirect the root domain to another
+service]].
+
+After saving the settings and waiting for the DNS to update, we can test whether the sites are
+available by navigating to =https://kponics.com= and =https://www.kponics.com=.
+
+* Block public access to the S3 bucket
+
+And now we are ready for a final step. Here, we can remove the public access from our bucket and
+only allow CloudFront to access it.
+
+First, we remove the =www-kponics-bucket= resource entirely because we will no longer need a
+separate bucket for the =www= subdomain. Next, we need to reconfigure the policy for the bucket to
+the following:
+
+#+BEGIN_SRC
+data "aws_iam_policy_document" "kponics-bucket-policy" {
+  statement {
+    sid = "CloudFrontGetObject"
+
+    actions = [
+      "s3:GetObject",
+    ]
+
+    resources = [
+      "arn:aws:s3:::${var.kponics_bucket}/*",
+    ]
+
+    principals {
+      type        = "AWS"
+      identifiers = [aws_cloudfront_origin_access_identity.origin-access-identity.iam_arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "kponics-bucket-policy" {
+  bucket = aws_s3_bucket.kponics-bucket.id
+  policy = data.aws_iam_policy_document.kponics-bucket-policy-document.json
+}
+#+END_SRC
+
+The major change here is that we now only allow the CloudFront OAI access to the bucket. We added a
+=aws_s3_bucket_policy= to get rid of a dependency cycle in Terraform. The final change is to change
+the =acl= field of the =kponics-bucket= from =public-read= to =private= and to remove the policy
+field entirely.
+
+#+BEGIN_SRC
+resource "aws_s3_bucket" "kponics-bucket" {
+  bucket = var.kponics_bucket
+  acl    = "private"
+
+  website {
+    index_document = "index.html"
+    error_document = "error.html"
+  }
+
+  tags = {
+    Name      = "kponics.com Bucket"
+    Terraform = "true"
+  }
+}
+#+END_SRC
+
+After a =terraform apply=, we can verify that everything is still working by navigating to
+=https://kponics.com= and =https://www.kponics.com=.
+
+* Conclusion
+
+In this section we enabled HTTPS for our website. We requested a TLS certificate with Terraform
+from the Amazon Certificate Manager. We also set up a CloudFront distribution for our site. In
+general, it's not necessary to do this to enable HTTPS. This is just a requirement of AWS when
+hosting a website from S3.

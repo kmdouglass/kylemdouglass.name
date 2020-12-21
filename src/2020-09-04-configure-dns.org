@@ -1,0 +1,114 @@
+#+TITLE: Configure the DNS for the Static Website
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2020-09-04
+#+EMAIL: kyle.m.douglass@gmail.com
+
+#+BEGIN_ABSTRACT
+I explain how to configure our nameserver's DNS settings to point our domain name to our static
+website.
+#+END_ABSTRACT
+
+* Configure our domain name service
+
+Let's assume that we own the domain name =kponics.com=; it was purchased from Namecheap, a popular
+domain name registrar. Our requirements for accessing the our website are the following:
+
+1. When we enter =kponics.com= into our browser's address bar and press Enter, then our website is
+   displayed.
+2. When we enter =www.kponics.com= into our browser's address bar and press Enter, then our website
+   is displayed.
+
+To do this, we first need to understand two concepts from DNS: A records and CNAME records.
+
+** A records and CNAME records
+
+According to https://support.dnsimple.com/articles/a-record/:
+
+#+BEGIN_QUOTE
+An A record maps a domain name to the IP address (Version 4) of the computer hosting the domain. An
+A record uses a domain name to find the IP address of a computer connected to the internet
+
+The A in A record stands for Address. Whenever you visit a web site, send an email, connect to
+Twitter or Facebook, or do almost anything on the Internet, the address you enter is a series of
+words connected with dots.
+#+END_QUOTE
+
+From the same site, https://support.dnsimple.com/articles/cname-record/:
+
+#+BEGIN_QUOTE
+CNAME records can be used to alias one name to another. CNAME stands for Canonical Name.
+
+A common example is when you have both example.com and www.example.com pointing to the same
+application and hosted by the same server. To avoid maintaining two different records, it’s common
+to create:
+
+- An A record for example.com pointing to the server IP address
+- A CNAME record for www.example.com pointing to example.com
+#+END_QUOTE
+
+So an A record is a mapping from a domain name to an IP address, whereas a CNAME record is a
+mapping from a domain name to a domain name.
+
+In the following sections, we will configure the CNAME records for our website.
+
+** Configure the CNAME records in Namecheap
+
+[[https://www.namecheap.com/support/knowledgebase/article.aspx/579/2237/which-record-type-option-should-i-choose-for-the-information-im-about-to-enter][The Namecheap documentation]] describes how to configure the advanced DNS settings for our domain.
+
+From the Namecheap login page, navigate through the following pages:
+
+- Dashboard
+- kponics.com
+- Mouseover the image of a house in the =Products= column
+- Advanced DNS
+- Add new record
+
+Select =CNAME Record=, select =@= for =Host= and enter the URL for our bucket for the =Value=. Then
+do the same with a new record but with =www= for =Host= so that =http://www.kponics.com= may be
+used as well.[fn:1] The =@= is used to refer to the domain name itself without any
+subdomains. Finally, remove the =www= host and =parkingpage.namecheap.com= name record and the =@=
+URL Redirect Record if they exist.
+
+After saving these changes, you may have to wait a while before the URL works. Once it does,
+though, you will be able to access the site by navigating to http://kponics.com.
+
+** Create a new bucket for www.kponics.com
+
+You may have noticed that https://www.kponics.com does not work and instead returns a 404 response
+code. One surprise for many people using S3 to host static websites is that [[https://forums.aws.amazon.com/thread.jspa?messageID=224512][you need a separate
+bucket for each subdomain]].  This means that we need a different bucket for the www subdomain that
+redirects to the root bucket.
+
+To add this bucket, simply add a new bucket to the infra/buckets.tf file with the following
+configuration and =terraform apply= it. (You will also need to add the www_kponics_bucket
+variable.)
+
+#+BEGIN_SRC
+resource "aws_s3_bucket" "www-kponics-bucket" {
+  bucket = var.www_kponics_bucket
+
+  website {
+    redirect_all_requests_to = "kponics.com"
+  }
+
+  tags = {
+    Name = "www.kponics.com Bucket"
+  }
+}
+#+END_SRC
+
+Now http://www.kponics.com should redirect to http://kponics.com.
+
+* Conclusion
+
+In this report we have seen how to configure the DNS for our website through Namecheap's
+administration panel. We learned about the difference between A records and CNAME records, and how
+to create a CNAME record that points to the URL that corresponds to the bucket that hosts our
+files. We also learned that each subdomain of our website must have its own bucket. This is a
+requirement that is imposed by AWS S3.
+
+Next up, we will configure TLS for our website so that we can use =https=.
+
+[fn:1] If we had selected a =URL Redirect Record= and pointed it to the URL for our bucket, then
+the URL in the browser would have automatically changed to the longer form from AWS when we
+accessed our page. We use a CNAME record instead to prevent this from happening.

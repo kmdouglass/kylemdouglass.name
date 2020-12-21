@@ -1,0 +1,197 @@
+#+TITLE: NixOS on a Raspberry Pi
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2020-08-21
+
+#+BEGIN_ABSTRACT
+I describe how to install and set up NixOS on a Raspberry Pi 3B+.
+#+END_ABSTRACT
+
+* Get a NixOS image
+
+I first need to get an image from Hydra, the continuous build system for Nix. For the Raspberry Pi
+3B+, I need an image that corresponds to the AArch64 architecture.
+
+#+BEGIN_SRC sh :results output :session nixos
+wget -O ~/Downloads/nixos-sd-image-20.03.2665.274831839c4-aarch64-linux.img.bz2 https://hydra.nixos.org/build/124508625/download/1/nixos-sd-image-20.03.2665.274831839c4-aarch64-linux.img.bz2
+#+END_SRC
+
+#+RESULTS:
+
+After downloading the image, the next step is to extract the file's contents.
+
+#+BEGIN_SRC sh :results output :session nixos
+bzip2 -d ~/Downloads/nixos-sd-image-20.03.2665.274831839c4-aarch64-linux.img.bz2
+#+END_SRC
+
+#+RESULTS:
+
+* Copy the image onto an SD card
+** Determine the device file for the SD card
+
+ I often use the last few lines from =dmesg= to get the device file of the SD card immediately after
+ I plug it in to my laptop. Here I am viewing the ten most recent messages from the kernel after
+ having plugged it in:
+
+ #+BEGIN_SRC sh :results output :session nixos
+ dmesg | tail -n 10
+ #+END_SRC
+
+ #+RESULTS:
+ #+begin_example
+ [ 2133.088101] alx 0000:3e:00.0: AER: PCIe Bus Error: severity=Corrected, type=Data Link Layer, (Receiver ID)
+ [ 2133.088109] alx 0000:3e:00.0: AER:   device [1969:e0b1] error status/mask=00000080/00002000
+ [ 2133.088115] alx 0000:3e:00.0: AER:    [ 7] BadDLLP
+ [ 2138.016884] EXT4-fs (mmcblk0p2): mounted filesystem with ordered data mode. Opts: (null)
+ [ 2138.039932] sd 4:0:0:0: ioctl_internal_command return code = 8000002
+ [ 2138.039934] sd 4:0:0:0: Sense Key : No Sense [current]
+ [ 2138.039935] sd 4:0:0:0: Add. Sense: Medium not present
+ [ 2143.048626] sd 4:0:0:0: ioctl_internal_command return code = 8000002
+ [ 2143.048628] sd 4:0:0:0: Sense Key : No Sense [current]
+ [ 2143.048630] sd 4:0:0:0: Add. Sense: Medium not present
+ #+end_example
+
+ From the above, I can infer that the device file contains the characters =mmcblk=. I can also
+ infer that a file system already exists on the SD card because of the contents of the message and
+ the characters =p2= indicate a second partition.
+
+ To verify that this is indeed the device, I first unplug it from my laptop and run the below
+ command:
+
+ #+BEGIN_SRC sh :results output :session nixos
+ ls /dev | grep mmcblk
+ #+END_SRC
+
+ #+RESULTS:
+
+ There are no devices containing these characters. Plugging in the card and rerunning the command
+ produces the following:
+
+ #+BEGIN_SRC sh :results output :session nixos
+ ls /dev | grep mmcblk
+ #+END_SRC
+
+ #+RESULTS:
+ : mmcblk0
+ : mmcblk0p1
+ : mmcblk0p2
+
+** Zero the SD card
+
+Since the card already contains a file system, I will go ahead and set all the bytes to zero. This
+step likely is not necessary, but it will help to ensure that I start from a clean slate and avoid
+any possible errors that might arise from not doing so.[fn:1]
+
+#+BEGIN_SRC sh :results output :session nixos :dir /sudo::
+dd if=/dev/zero of=/dev/mmcblk0 bs=5M
+sync
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+dd: error writing '/dev/mmcblk0': No space left on device
+29665+0 records in
+29664+0 records out
+31104958464 bytes (31 GB, 29 GiB) copied, 2234.21 s, 13.9 MB/s
+#+end_example
+
+Once zeroed, I copy the image to the SD card in a similar manner.
+
+#+BEGIN_SRC sh :results output :session nixos :dir /sudo::
+dd if=/home/kmdouglass/Downloads/nixos-sd-image-20.03.2665.274831839c4-aarch64-linux.img of=/dev/mmcblk0 bs=5M
+sync
+#+END_SRC
+
+#+RESULTS:
+: 542+1 records in
+: 542+1 records out
+: 2841923584 bytes (2.8 GB, 2.6 GiB) copied, 231.494 s, 12.3 MB/s
+
+* Boot the Raspberry Pi and do a basic configuration
+
+For this section I work under the following conditions:
+
+- The Raspberry Pi is connected to my home network via an ethernet cable
+- I have a USB keyboard connected to the Pi
+- I have a monitor connected to the pi via a HDMI cable
+
+I insert the SD card into the Raspberry Pi and boot it. It takes a few seconds to expand the file
+system, but when it is done I am presented with a terminal prompt. The user is =nixos=.
+
+For this part I more-or-less follow the short guide at
+https://citizen428.net/blog/installing-nixos-raspberry-pi-3/, but I use my own configuration to
+bootstrap the Pi. First, I set the root user password and login as root:
+
+#+BEGIN_SRC sh
+sudo passwd
+su
+#+END_SRC
+
+Next, I download the bootstrap configuration for NixOS from https://github.com/kmdouglass/homelab.
+
+#+BEGIN_SRC sh
+curl https://raw.githubusercontent.com/kmdouglass/homelab/master/servers/bootstrap/rpi3.nix > /etc/nixos/configuration.nix
+#+END_SRC
+
+The bootstrap configuration requires that the hostname be set manually. I edit the configuration
+file, and change the hostname field accordingly:
+
+#+BEGIN_SRC sh
+nano /etc/nixos/configuration.nix
+#+END_SRC
+
+Another important thing to note about this configuration file is that it is used to provision my
+ssh key onto the device. If you are following along with this guide, be sure to change the public
+key to your own.
+
+I then run the following commands:
+
+#+BEGIN_SRC sh
+sudo nixos-rebuild switch
+nix-collect-garbage -d
+nixos-rebuild switch # removes now unused boot loader entries
+reboot
+#+END_SRC
+
+So what did I just do? According to the [[https://nixos.org/nixos/manual/#sec-changing-config][documentation]]:
+
+#+BEGIN_QUOTE
+The file /etc/nixos/configuration.nix contains the current configuration of your machine. Whenever
+you’ve changed something in that file, you should do `nixos-rebuild switch` to build the new
+configuration, make it the default configuration for booting, and try to realise the configuration
+in the running system (e.g., by restarting system services).
+#+END_QUOTE
+
+* Finalize the setup
+
+At this point I am able to ssh onto the Pi using the root user. First I get the ip address from the
+Raspberry Pi:
+
+#+BEGIN_SRC sh
+ip a
+#+END_SRC
+
+In my case, the ip address is 192.168.22.67. From my laptop, I run the following command:
+
+#+BEGIN_SRC
+ssh root@192.168.22.67
+#+END_SRC
+
+* Conclusion
+
+This article describes how to bootstrap NixOS onto a Raspberry Pi 3B+ and get it to the point where
+one can further customize it. The likely next steps would include:
+
+- Add a regular user
+- Tighten up ssh security by disabling password logins and setting up authorized keys
+- Install packages
+
+* Links
+- https://nixos.wiki/wiki/NixOS_on_ARM/Raspberry_Pi
+- https://citizen428.net/blog/installing-nixos-raspberry-pi-3/
+- https://github.com/zupo/nix
+
+* Footnotes
+
+[fn:1] I set the block size argument to 5M because my SD card supports 10 Mb/s write speeds and I
+was following the rule of thumb that the block size should be half the maximum write speed of the
+slowest device.

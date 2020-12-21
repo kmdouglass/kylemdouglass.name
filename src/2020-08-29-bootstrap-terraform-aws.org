@@ -1,0 +1,455 @@
+#+TITLE: Bootstrap a Project on AWS with Terraform
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2020-08-29
+#+EMAIL: kyle.m.douglass@gmail.com
+
+#+BEGIN_ABSTRACT
+I explain how to bootstrap a new project onto AWS with Terraform.
+#+END_ABSTRACT
+
+* Managing AWS infrastructure with Terraform
+
+Amazon Web Services (AWS) is a company that provides tools enabling people to build software-based
+services on the cloud. At the most basic level, AWS provides components that engineers and
+developers combine to build complete applications. As an example, a web service that is built on
+AWS may comprise the following components:
+
+- a web server to handle client requests that runs on an AWS EC2 virtual machine,
+- a database service to persist application data using AWS RDS,
+- a private network (also known as a virtual private cloud, or VPC) in which the web server runs,
+- and many more low-level components, such as firewall rules and a DNS service.
+
+AWS provides the web console as an interactive means to create, delete, and modify
+resources. Though easy to understand and use, building applications through the web console does
+not scale well because it is difficult to manually maintain more than a few tens of AWS
+resources. AWS also provides APIs for all of their services, which allows engineers to manage
+resources programmatically. Automating resource management through their own customized programs
+allows engineers to build larger-scale applications than by using the web console alone.
+
+Writing programs to make API calls has its own downsides, however. By using this approach,
+engineers must concern themselves with development and maintenance of a codebase to manage their
+infrastructure. These concerns are orthogonal to the goal of creating a web application.
+
+[[https://www.terraform.io/][Terraform]] is a tool that addresses these two problems. With Terraform, engineers specify the
+resources and their settings in version-controlled configuration files. This approach, which is
+sometimes referred to as [[https://en.wikipedia.org/wiki/Infrastructure_as_code][infrastructure as code]], enables the development of large-scale
+services. The configuration files are written in a domain-specific language called HCL (or
+HashiCorp Configuration Language). HCL focuses on cloud resource creation and management while
+offering little else in terms of functionality. The reduced feature set of HCL means that engineers
+need not concern themselves with many of the aspects of managing a general codebase.
+
+Terraform is not limited to AWS. It has a plugin interface known as [[https://www.terraform.io/docs/providers/index.html][providers]] for interfacing with
+many cloud service platforms. Furthermore, its use brings benefits to small projects as well
+because the configuration files act as documentation and, when tracked in version control, provide
+a history of infrastructure changes.
+
+In this article I will describe some of the core concepts and an approach to bootstrapping a
+project on AWS with Terraform. I will use the following software tools and versions:
+
+#+BEGIN_SRC sh :results output :exports results :session
+terraform version | head -n 1
+echo AWS Vault $(aws-vault --version)
+~/venvs/aws/bin/aws --version
+#+END_SRC
+
+#+RESULTS:
+: Terraform v0.12.20
+: AWS Vault v5.3.2
+: aws-cli/1.18.50 Python/3.7.5 Linux/5.3.0-51-generic botocore/1.16.0
+
+* Secure authentication with AWS Vault
+
+** Authenicating API requests
+
+ Terraform makes API requests to manage resources on AWS. The interface between Terraform and AWS
+ APIs is the [[https://www.terraform.io/docs/providers/aws/index.html][Terraform AWS provider]]. The provider requires AWS credentials for
+ authentication. [[https://www.terraform.io/docs/providers/aws/index.html#authentication][According to the provider's documentation]], there are four methods for
+ authentication:
+
+ 1. Static credentials
+ 2. Environment variables
+ 3. Shared credentials file
+ 4. EC2 role
+
+ In my experience option 2: environment variables is the method that is most frequently used,
+ possibly because it's easy to use and understand. To authenticate with environment variables, one
+ sets the values of the environment variables =AWS_ACCESS_KEY_ID= and =AWS_SECRET_ACCESS_KEY= to [[https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html][an
+ IAM user key pair]]. Terraform will read and use these values when invoked. A key pair consists of
+ two strings, one to identify a user and one to authenticate him or her. Both are required to sign
+ an AWS API request.
+
+ Key pairs are referred to in the AWS documentation as long-term credentials. This is because they
+ do not expire automatically after a fixed time. [[https://docs.aws.amazon.com/general/latest/gr/aws-access-keys-best-practices.html#use-roles][The use of long-term credentials for signing API
+ requests is discouraged in many scenarios]]. As an alternative, the keys may be used to request
+ temporary credentials from the [[https://docs.aws.amazon.com/STS/latest/APIReference/Welcome.html][AWS Security Token Service]] (STS), and the temporary credentials
+ would then be used to sign API requests.
+
+** Key pair management with AWS Vault
+
+ Making STS requests each time you wish to request temporary credentials can be cumbersome, so
+ people created tools to automate the process. [[https://github.com/99designs/aws-vault][AWS Vault]] is one such tool for automating key pair
+ management and STS requests. AWS Vault works by storing key pairs in one of several possible
+ backends, such as the [[https://www.passwordstore.org/][Pass UNIX password manager]]. When you make an API call, AWS Vault will use
+ the key pair to request temporary credentials from AWS STS. These temporary credentials will be
+ injected into the subprocess that is making the AWS API calls via the same environment variables
+ that were noted above.
+
+ Let's begin an example by assuming the following:
+
+ - you have installed AWS Vault on your system and the =aws-vault= binary is on your =PATH=
+ - you already have an IAM user called Administrator in your AWS account and are not using your
+   root account ([[https://docs.aws.amazon.com/general/latest/gr/aws-access-keys-best-practices.html#root-password][you should not have a key pair for your root account]] and should never use the root
+   account for infrastructure management)
+ - you have generated a key pair for the Administrator user
+ - you have configured multifactor authentication (MFA) for this user
+
+ We will first configure the backend that will be used by AWS Vault to securely store key
+ pairs. Next, we will add the Administrator user's key pair to AWS Vault. We will finish the setup
+ by adding the MFA settings to the ~/.aws/config file, which is used by the aws-vault binary.
+
+ To get the list of backends available on your system, you may invoke the =aws-vault= binary with
+ the --help option:
+
+ #+BEGIN_SRC sh :results output :exports both :session
+aws-vault --help
+ #+END_SRC
+
+ #+RESULTS:
+ #+begin_example
+ usage: aws-vault [<flags>] <command> [<args> ...]
+
+ A vault for securely storing and accessing AWS credentials in development
+ environments.
+
+ Flags:
+   --help                     Show context-sensitive help (also try --help-long
+			      and --help-man).
+   --version                  Show application version.
+   --debug                    Show debugging output
+   --backend=BACKEND          Secret backend to use [secret-service kwallet pass
+			      file]
+   --prompt=terminal          Prompt driver to use [terminal kdialog osascript
+			      zenity]
+   --keychain="aws-vault"     Name of macOS keychain to use, if it doesn't exist
+			      it will be created
+   --pass-dir=PASS-DIR        Pass password store directory
+   --pass-cmd=PASS-CMD        Name of the pass executable
+   --pass-prefix=PASS-PREFIX  Prefix to prepend to the item path stored in pass
+
+ Commands:
+   help [<command>...]
+     Show help.
+
+   add [<flags>] <profile>
+     Adds credentials, prompts if none provided
+
+   list [<flags>]
+     List profiles, along with their credentials and sessions
+
+   rotate [<flags>] <profile>
+     Rotates credentials
+
+   exec [<flags>] <profile> [<cmd>] [<args>...]
+     Executes a command with AWS credentials in the environment
+
+   remove [<flags>] <profile>
+     Removes credentials, including sessions
+
+   login [<flags>] <profile>
+     Generate a login link for the AWS Console
+
+ #+end_example
+
+ The list of available backends is located in the line starting with --backend=BACKEND. In my case,
+ it includes secret-service, kwallet, pass, and file. In my experience the first one in the list is
+ used by default, which here is secret-service. (This corresponds to the GNOME keyring on my Ubuntu
+ system.) The GNOME keyring is OK for me, but if you wish to change the backend you may do so by
+ passing a value to the --backend flag of aws-vault or by setting the =AWS_VAULT_BACKEND=
+ environment variable to one of the values in the list.
+
+ Adding the user's key pair is simple:
+
+ #+BEGIN_EXAMPLE
+$ aws-vault add admin
+Enter Access Key Id: ABDCDEFDASDASF
+Enter Secret Key: %%%
+ #+END_EXAMPLE
+
+ (The admin argument to =aws-vault add= is the name of a profile.) The result of this action is
+ that data is added to two different locations:
+
+ 1. the GNOME keyring
+ 2. the ~/.aws/config configuration file
+
+ The access key and secret key of the Administrator user are saved under a folder called =awsvault=
+ in the GNOME keyring. You can see them by opening the keyring application.
+
+ AWS Vault uses a configuration file that is identical to [[https://docs.aws.amazon.com/cli/latest/topic/config-vars.html][the one used by the AWS CLI]]. In this
+ file, a profile is a logical grouping of configuration settings. By default, it is located at
+ ~/.aws/config.
+
+ When you open the file you should see a line that looks like this:
+
+ #+begin_example
+[profile admin]
+ #+end_example
+
+ Let's go ahead and add the configuration for the multifactor authentication. Go to the AWS web
+ console and open the IAM service page. Select Users, and then select the Administrator user.  Next
+ select the Security Credentials tab. You need to copy the ARN that corresponds to the MFA and
+ paste it into your aws-vault configuration file underneath the profile for the Administrator
+ user. Mine looks like the following:
+
+ #+BEGIN_EXAMPLE
+ [profile admin]
+ region=us-east-1
+ mfa_serial=arn:aws:iam::XXXXXXXXXXXX:mfa/Administrator
+ #+END_EXAMPLE
+
+ In the following sections, aws-vault will now prompt us for a MFA key the first time that we use
+ it.
+
+* Bootstrapping Terraform
+
+Now that we have set up our credentials and can securely use them to make calls to AWS, we can set
+up the infrastructure that is necessary to manage our service with Terraform. The initial setup is
+a bit of a chicken-and-egg problem in the sense that we would like to use Terraform to create our
+infrastructure, but Terraform requires a few pieces of infrastructure to be present before we can
+create it. In particular, we want to store [[https://www.terraform.io/docs/state/remote.html][the state of our infrastructure in a AWS S3 bucket]] and
+to use a DynamoDB table to hold the locks on the state. (Locks are used prevent multiple people
+from modifying the infrastructure at the same time.) Our goal of this section, therefore, is to
+create a bucket to hold the remote state and a database table to hold the state's lock. We will do
+all of this using Terraform.
+
+The strategy will be as follows:
+
+1. Define the required resources in Terraform configuration files
+2. Create the resources on AWS, storing the initial Terraform state locally
+3. Copy the local state onto AWS
+
+To my knowledge, this approach was first described on the blog of [[https://xinau.ch/notes/creating-a-terraform-backend-using-terraform/][Felix Ehrenpfort]].
+
+** Define the resources required to bootstrap Terraform
+
+ Let's begin by creating a folder inside the root directory that will contain our project's files.
+ The name of this folder is bootstrap. Create a new file called remote-state.tf inside this folder,
+ and add the following contents:
+
+ #+BEGIN_SRC
+resource "aws_s3_bucket" "terraform-state" {
+  bucket        = var.bucket
+  acl           = "private"
+  force_destroy = false
+  region        = var.region
+
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+	sse_algorithm = "AES256"
+      }
+    }
+  }
+
+  versioning {
+    enabled = true
+  }
+
+  tags = {
+    "Name" = "Terraform state"
+  }
+}
+
+resource "aws_dynamodb_table" "terraform-state-lock" {
+  name         = var.dynamodb_table
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LockID"
+
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    "Name" = "Terraform state locks"
+  }
+}
+ #+END_SRC
+
+ This file defines two resources: a bucket that will contain the remote state, and a DynamoDB table
+ that will contain locks on the state. In another file called variables.tf, we define a few of the
+ variables that are used by these resources:
+
+ #+BEGIN_SRC
+variable "bucket" {
+  description = "AWS S3 bucket to use for the Terraform remote state"
+  type        = string
+}
+
+variable "dynamodb_table" {
+  description = "AWS DynamoDB table name to use for state locking"
+  type        = string
+}
+
+variable "region" {
+  description = "The AWS region that will contain the bucket for the remote state"
+  type        = string
+}
+ #+END_SRC
+
+ Finally, create one last file called =backend.hcl=. Inside this file, values for the variables
+ will be provided:
+
+ #+BEGIN_SRC
+ bucket         = "terraform-state-for-my-service"
+ dynamodb_table = "terraform-state-lock"
+ region         = "us-east-1"
+ #+END_SRC
+
+ With these files in place, we have fully defined everything that is necessary to bootstrap
+ Terraform.
+
+** Create the backend resources
+
+ From inside the bootstrap folder run the command =terraform init=. This command will initialize a
+ new terraform working directory.
+
+ #+BEGIN_SRC sh :results output :exports both :session
+ terraform init
+ #+END_SRC
+
+ #+RESULTS:
+ #+begin_example
+ Initializing the backend...
+
+ Initializing provider plugins...
+ - Checking for available provider plugins...
+ - Downloading plugin for provider "aws" (hashicorp/aws) 3.4.0...
+
+ The following providers do not have any version constraints in configuration,
+ so the latest version was installed.
+
+ To prevent automatic upgrades to new major versions that may contain breaking
+ changes, it is recommended to add version = "..." constraints to the
+ corresponding provider blocks in configuration, with the constraint strings
+ suggested below.
+
+ * provider.aws: version = "~> 3.4"
+
+ Terraform has been successfully initialized!
+
+ You may now begin working with Terraform. Try running "terraform plan" to see
+ any changes that are required for your infrastructure. All Terraform commands
+ should now work.
+
+ If you ever set or change modules or backend configuration for Terraform,
+ rerun this command to reinitialize your working directory. If you forget, other
+ commands will detect it and remind you to do so if necessary.
+
+ #+end_example
+
+ One of the results of this command is the creation of a folder called .terraform inside the
+ bootstrap directory. This folder contains information about the working directory, including a
+ binary file that makes API calls to AWS. At this point, we can create the resources by running the
+ following command:
+
+ #+BEGIN_SRC sh
+aws-vault exec admin -- terraform apply -var-file backend.hcl
+ #+END_SRC
+
+ Here, admin is the name of the aws-vault profile that we previously configured. So what happened
+ here? Terraform made the API calls to AWS that created the resources defined in the file
+ remote-state.tf. In addition, we should now have a local state file called terraform.tfstate. This
+ file contains a snapshot of what is currently deployed onto AWS.
+
+ If all went well, we can verify that a new S3 bucket and DynamoDB table have been created through
+ the AWS web console.
+
+** Copy the local Terraform state to AWS
+
+ And now it is time to move the data inside the local state file that was just created onto the
+ resources on AWS that were also just created. Before we do, let's create a commit into version
+ control so that we have a record of the bootstrap phase in its own commit.
+
+ #+BEGIN_SRC sh
+ # Move out of the bootstrap directory into the root directory of the project
+ pushd ..
+ git init
+ git add .
+ git commit -m "Bootstrap the AWS backend resources"
+ popd
+ #+END_SRC
+
+ Next, create a file called main.tf inside the bootstrap directory with the following contents:
+
+ #+BEGIN_SRC
+terraform {
+  backend "s3" {
+    key = "backend.tfstate"
+  }
+}
+ #+END_SRC
+
+ This file defines a backend that is stored on S3. The name of the file in the bucket will be
+ called backend.tfstate. This backend definition is called [[https://www.terraform.io/docs/backends/config.html#partial-configuration][a partial configuration]] because it is
+ missing required information. The information that is missing are values for the fields
+
+ 1. bucket
+ 2. region
+
+ In addition, we also want to specify an optional field called dynamodb_table. You may have noticed
+ that the names of these fields correspond to the same fields that are specified in the file
+ backend.hcl. When we copy the state, we can therefore use the backend.hcl file to provide the
+ missing information without having to manually add it to the file main.tf, keeping everything
+ in-sync.
+
+ To copy the state, we use the backend-config and reconfigure flags to the =terraform init=
+ command:
+
+ #+BEGIN_SRC sh
+ aws-vault exec admin -- terraform init -backend-config=backend.hcl -reconfigure
+ #+END_SRC
+
+ #+RESULTS:
+ #+begin_example
+ Initializing the backend...
+ Acquiring state lock. This may take a few moments...
+ Do you want to copy existing state to the new backend?
+   Pre-existing state was found while migrating the previous "local" backend to the
+   newly configured "s3" backend. No existing state was found in the newly
+   configured "s3" backend. Do you want to copy this state to the new "s3"
+   backend? Enter "yes" to copy and "no" to start with an empty state.
+
+  Enter a value:
+
+ #+end_example
+
+ Entering yes and pressing the Enter key will copy the state onto AWS. Let's create another
+ commit to record this into the history of the repository.
+
+ #+BEGIN_SRC
+ git add main.tf
+ git commit -m "Migrate the remote state to the new AWS S3 backend"
+ #+END_SRC
+
+ Again, we can verify that these new resources exist through the web console. In particular, there
+ should now be a file called backend.tfstate inside a bucket called terraform-state-for-my-service
+ and a DynamoDB table called terraform-state-lock.
+
+* Conclusion
+
+In this article I demonstrated how to bootstrap a new project onto AWS using Terraform. In
+particular, I discussed how to securely manage and use the credentials of an IAM user using
+aws-vault. With this method, you do not need to store your credentials in environment variables or
+use long-lived credentials for making API calls to AWS.
+
+In addition, we saw how to solve the chicken-and-egg problem of using Terraform to set up the
+infrastructure that is required by Terraform itself. We first create the backend resources using
+Terraform, storing the Terraform state locally. After committing these changes, we copy the state
+to the new remote backend using the reconfigure flag to the =terraform init= command and a partial
+backend configuration.
+
+With this bootstrapping in place, we are ready to build our project.

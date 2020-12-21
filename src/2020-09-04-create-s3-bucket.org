@@ -1,0 +1,309 @@
+#+TITLE: Create a S3 Bucket to Host the Website Files
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2020-09-04
+#+EMAIL: kyle.m.douglass@gmail.com
+
+#+BEGIN_ABSTRACT
+We discuss how to create a AWS S3 bucket using Terraform to serve static files for our website.
+#+END_ABSTRACT
+
+* Hosting a static website with AWS S3
+
+A static website is a website whose files are already generated when a client requests them from a
+web server. In contrast, a dynamic website generates files on-demand from a client. As an example
+of the latter, consider a shopping cart on an e-commerce site. The shopping cart's contents will
+vary depending on what the user has added to it. As a result, the page that displays the contents
+has to be created dynamically by the server when the user requests to see it.
+
+S3 is a simple choice for hosting static websites because S3 is fundamentally a remote object
+store. It is also easy to configure to serve static sites. On the other hand, some features, such
+as HTTP over TLS (https), require a bit more work to set up then one might expect.
+
+In this report, we will briefly discuss how to create and configure a bucket to a serve static
+website. And because we value automation, we will continue to use Terraform.
+
+The versions of the tools that i used for this report are:
+
+#+BEGIN_SRC sh :results output :exports results :session
+terraform version | head -n 1
+echo AWS Vault $(aws-vault --version)
+~/venvs/aws/bin/aws --version
+#+END_SRC
+
+#+RESULTS:
+: Terraform v0.12.24
+: AWS Vault v5.3.2
+: aws-cli/1.18.50 Python/3.7.5 Linux/5.4.0-42-generic botocore/1.17.21
+
+* Reorganize the repository
+
+In the previous report, we bootstrapped the infrastructure to hold our website. We did everything
+inside a folder called bootstrap inside our repository. With the bootstrapping out of the way, we
+can reorganize the repository. In the following, we rename the bootstrap folder to infra because it
+holds the infrastructure configuration for the website.
+
+#+BEGIN_SRC
+git mv bootstrap infra
+git commit -m "Rename the bootstrap folder to infra"
+#+END_SRC
+
+* Create the bucket with Terraform
+
+At this stage, we need to create only two resources through Terraform:
+
+1. A bucket to hold our HTML and CSS files
+2. A policy that allows others to read files from the bucket
+
+These are easily created by creating a new file called buckets.tf inside our infra folder with the
+following contents:
+
+#+BEGIN_SRC
+resource "aws_s3_bucket" "kponics-bucket" {
+  bucket = var.kponics_bucket
+  acl    = "public-read"
+  policy = data.aws_iam_policy_document.kponics-bucket-policy.json
+
+  website {
+    index_document = "index.html"
+    error_document = "error.html"
+  }
+
+  tags = {
+    Name = "kponics.com Bucket"
+  }
+}
+
+data "aws_iam_policy_document" "kponics-bucket-policy" {
+  statement {
+    sid = "PublicReadGetObject"
+
+    actions = [
+      "s3:GetObject",
+    ]
+
+    resources = [
+      "arn:aws:s3:::${var.kponics_bucket}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+  }
+}
+#+END_SRC
+
+The first resource, =kponics-bucket=, defines the bucket. There are a few interesting things to
+note about the configuration of this resource:
+
+- =acl = "public-read"= :: This defines the canned access control list for the bucket. [[https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl][A canned ACL]]
+  is a set of predefined grants, i.e. a predefined set of grantees and their permissions. With the
+  public-read ACL, all users get read access to the bucket's contents.
+- =website= :: Here we configure the default landing and error pages (index.html and error.html,
+  respectively).
+
+The second resource defines the policy for the bucket. With this policy we allow any user to get
+objects from this bucket by allowing the =s3GetObject= action on all resources for all principals.
+
+The value for the variable =kponics_bucket= is stored in a new file called terraform.tfvars.
+
+#+BEGIN_SRC
+kponics_bucket = "kponics.com"
+#+END_SRC
+
+Terraform will automatically interpolate variables with the values found inside this file.
+
+* Deploying files to the bucket
+
+** Create a IAM user and role for deployments
+
+Before we create the bucket, we will also need a way to deploy files to it. For this website, we
+have the following requirements:
+
+- We don't want to deploy with the Administrator user because its purpose is to manage the
+  infrastructure for the website
+- We want to be able to deploy both from our local machine and possibly from a continuous
+  integration service
+- The mechanism to deploy files to the website should only have permissions to upload, download,
+  and delete files from the bucket
+
+To achieve this, we will create a new AWS IAM user and role in our account. According to the
+[[https://aws.amazon.com/iam/faqs/][AWS documentation]]:
+
+#+BEGIN_QUOTE
+A user is a unique identity recognized by AWS services and applications. Similar to a login user in
+an operating system like Windows or UNIX, a user has a unique name and can identify itself using
+familiar security credentials such as a password or access key. A user can be an individual,
+system, or application requiring access to AWS services.
+#+END_QUOTE
+
+On the other hand:
+
+#+BEGIN_QUOTE
+An IAM role is an IAM entity that defines a set of permissions for making AWS service requests.
+#+END_QUOTE
+
+We can create the user to do our deployments. By default, it will not have any permissions except
+that it can assume the new role. The role does have permissions to read and write into the
+bucket. When the user assumes a role, it can do so only for a limited time. As a result, role-based
+deployments are more secure than granting permanent permission to the user to do deployments.
+
+First we create a new file called users_and_roles.tf. Its first resources define the user and role:
+
+#+BEGIN_SRC
+resource "aws_iam_user" "kponics" {
+  name = "kponics"
+
+  tags = {
+    "Name" = "kponics"
+  }
+}
+
+resource "aws_iam_role" "kponics-bucket-ops" {
+  name              = "kponics-bucket-ops"
+  assume_role_policy = data.aws_iam_policy_document.kponics-bucket-ops-assume-role-policy-document.json
+}
+#+END_SRC
+
+The user's name is =kponics= and the role's name is =kponics-bucket-ops=.
+
+We now need two policies:
+
+1. A policy that allows the =kponics-bucket-ops= role to read, write, and delete items in the
+   bucket
+2. A policy that grants permission to the =kponics= user to assume the =kponics-bucket-ops= role
+
+#+BEGIN_SRC
+resource "aws_iam_role_policy_attachment" "kponics-bucket-ops" {
+  role       = aws_iam_role.kponics-bucket-ops.name
+  policy_arn = aws_iam_policy.kponics-bucket-ops-policy.arn
+
+}
+
+resource "aws_iam_policy" "kponics-bucket-ops-policy" {
+  name        = "kponics-bucket-ops-policy"
+  description = "Policy for reading, writing, and deleting files in the bucket hosting kponics.com"
+
+  policy = data.aws_iam_policy_document.kponics-bucket-ops-policy-document.json
+}
+
+data "aws_iam_policy_document" "kponics-bucket-ops-policy-document" {
+  statement {
+    actions = [
+      "s3:ListBucket",
+    ]
+
+    resources = [
+      "arn:aws:s3:::${var.kponics_bucket}",
+    ]
+  }
+
+  statement {
+    actions = [
+      "s3:DeleteObject",
+      "s3:GetObject",
+      "s3:PutObject",
+    ]
+
+    resources = [
+      "arn:aws:s3:::${var.kponics_bucket}/*",
+    ]
+  }
+}
+
+data "aws_iam_policy_document" "kponics-bucket-ops-assume-role-policy-document" {
+  statement {
+    actions = [
+      "sts:AssumeRole"
+    ]
+
+    principals {
+      type = "AWS"
+      identifiers = [aws_iam_user.kponics.arn]
+    }
+  }
+}
+#+END_SRC
+
+With these in place, we can now add the bucket, the user, and the role to our infrastructure:
+
+#+BEGIN_SRC
+aws-vault exec admin -- terraform apply -var-file backend.hcl
+#+END_SRC
+
+** Add a user for CI-based deployments
+
+I mentioned in the previous section that we would like to be able to deploy from the CI. We will
+not add this feature now, but when we are ready for this, we can add a new user just for the CI and
+allow it to assume the =kponics-bucket-ops= role as well. This workflow allows us to define just
+one set of permissions for multiple users (the =kponics-bucket-ops= role) and easily revoke
+permissions from a single user if it is compromised.
+
+** Configure aws-vault for the new user
+
+Let's open our .aws/config file and add the following two lines, replacing the =X='s with your own
+AWS account number:
+
+#+BEGIN_SRC
+[profile kponics]
+region=us-east-1
+mfa_serial=arn:aws:iam::XXXXXXXXXXXX:mfa/kponics
+
+[profile kponics-bucket-ops]
+source_profile=kponics
+role_arn=arn:aws:iam::XXXXXXXXXXXX:role/kponics-bucket-ops
+mfa_serial=arn:aws:iam::XXXXXXXXXXXX:mfa/kponics
+#+END_SRC
+
+When we deploy new content to the website, we will use the profile =kponics-bucket-ops=. AWS Vault
+will automatically use the kponics user to assume the role.
+
+** Deploy to the bucket
+
+With everything in place, we can now deploy files to the bucket. Create two files called index.html
+and error.html inside a folder called build in the root directory of our project's repository. The
+files should contain just a HTML skeleton:
+
+#+BEGIN_SRC html
+<html>
+<head>
+  <title>Hello world</title>
+</head>
+<body>
+  <h1>Hello world</h1>
+</body>
+</html>
+#+END_SRC
+
+Next, let's see what happens when we try to deploy with our user and not our role. (Remember that
+the user itself does not have permissions to deploy to the bucket.) To do this, we will use the =s3
+sync --delete= command from the AWS CLI. This will synchronize the contents of a local folder
+(build, in our case), with the bucket.
+
+#+BEGIN_SRC sh
+aws-vault exec kponics -- aws s3 sync build s3://kponics.com --delete
+fatal error: An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied
+#+END_SRC
+
+If we use the role, however, the deployment should succeed:
+
+#+BEGIN_SRC sh
+aws-vault exec kponics-bucket-ops -- aws s3 sync build s3://kponics.com --delete
+upload: build/index.html to s3://kponics.com/index.html
+upload: build/error.html to s3://kponics.com/error.html
+#+END_SRC
+
+We can verify that our website is now working by finding the URL through the AWS web
+console. Navigate to the S3 service page and click on the new bucket =kponics.com=. Under the
+properties tab, there should be an option called "Static website hosting". The URL may be found by
+expanding this property. Navigate to it in your web browser.
+
+* Conclusion
+
+We have learned how to create a bucket with Terraform to serve files for a static website. In
+addition, we have configured a user and a role to allow us to safely deploy to this bucket. At this
+point, we are ready to begin creating the content for a website.
+
+On the other hand, there are few other things that we could do before creating the content. In
+particular, how would we point our domain name to this bucket? How would we enable https access to
+our site? These questions will be answered in the following reports.
