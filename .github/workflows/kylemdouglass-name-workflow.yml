@@ -1,0 +1,48 @@
+name: Build and deploy site
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-18.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v2
+      - name: Download and install pandoc
+        run: |
+          wget -O /tmp/pandoc.deb https://github.com/jgm/pandoc/releases/download/2.10.1/pandoc-2.10.1-1-amd64.deb
+          sudo dpkg -i /tmp/pandoc.deb
+      - name: Build the site
+        run: ./scripts/build.sh
+        shell: sh
+      - name: Upload site artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: site-artifacts
+          path: ./build
+
+  deploy:
+    name: Deploy site
+    needs: build
+    runs-on: ubuntu-18.04
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Download site artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: site-artifacts
+          path: ./build
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 900
+      - name: Copy files to the production website with the AWS CLI
+        run: |
+          aws s3 sync build s3://kylemdouglass.name --delete
