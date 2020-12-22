@@ -1,0 +1,332 @@
+#+TITLE: Installing Tasmota onto a Sonoff Switch
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2020-12-21
+#+OPTIONS: ^:nil
+#+PROPERTY: header-args :results output :exports both :eval never-export
+
+#+BEGIN_ABSTRACT
+I describe how to flash the open source Tasmota firmware onto a Sonoff TH16 switch. =esptool= is
+used to flash the firmware.
+#+END_ABSTRACT
+
+* Documentation
+
+The official documentation from Tasmota is already pretty good at describing the installation
+process. In addition, I found a YouTube video that specifically described how to install the
+firmware onto the Sonoff switch. These resources and others may be found below:
+
+- https://tasmota.github.io/docs/Getting-Started/
+- https://www.youtube.com/watch?v=exEmeyAwbmI
+- https://tasmota.github.io/docs/devices/Sonoff-TH/
+
+* Get Tasmota and esptool
+
+** Tasmota
+
+The Tasmota firmware can be obtained from the [[https://github.com/arendst/Tasmota/releases][GitHub releases page]]. I downloaded the latest version
+of =tasmota.bin=.
+
+#+BEGIN_SRC sh
+mkdir -p ~/opt/tasmota
+if [ -f ~/opt/tasmota/tasmota.bin ]
+then
+    echo "The file tasmota.bin already exists."
+else
+    echo "The file tasmota.bin does not exist. Downloading it..."
+    wget -O ~/opt/tasmota/tasmota.bin https://github.com/arendst/Tasmota/releases/download/v9.2.0/tasmota.bin
+fi
+#+END_SRC
+
+** esptool
+
+=esptool= is distributed as a Python package on PyPI, so it's relatively easy to obtain. I first
+created a virtual environment to install it into, and then installed it.
+
+#+BEGIN_SRC sh :results none
+mkdir -p ~/.venvs
+python3 -m venv ~/.venvs/esptool
+~/.venvs/esptool/bin/pip install --upgrade pip
+~/.venvs/esptool/bin/pip install esptool
+#+END_SRC
+
+I then confirmed that it was installed correctly.
+
+#+BEGIN_SRC sh
+~/.venvs/esptool/bin/esptool.py --help
+#+END_SRC
+
+#+begin_example
+usage: esptool [-h] [--chip {auto,esp8266,esp32,esp32s2,esp32s3beta2,esp32c3}]
+               [--port PORT] [--baud BAUD]
+               [--before {default_reset,no_reset,no_reset_no_sync}]
+               [--after {hard_reset,soft_reset,no_reset}] [--no-stub]
+               [--trace] [--override-vddsdio [{1.8V,1.9V,OFF}]]
+               [--connect-attempts CONNECT_ATTEMPTS]
+               {load_ram,dump_mem,read_mem,write_mem,write_flash,run,image_info,make_image,elf2image,read_mac,chip_id,flash_id,read_flash_status,write_flash_status,read_flash,verify_flash,erase_flash,erase_region,version,get_security_info}
+               ...
+
+esptool.py v3.0 - ESP8266 ROM Bootloader Utility
+
+positional arguments:
+  {load_ram,dump_mem,read_mem,write_mem,write_flash,run,image_info,make_image,elf2image,read_mac,chip_id,flash_id,read_flash_status,write_flash_status,read_flash,verify_flash,erase_flash,erase_region,version,get_security_info}
+                        Run esptool {command} -h for additional help
+    load_ram            Download an image to RAM and execute
+    dump_mem            Dump arbitrary memory to disk
+    read_mem            Read arbitrary memory location
+    write_mem           Read-modify-write to arbitrary memory location
+    write_flash         Write a binary blob to flash
+    run                 Run application code in flash
+    image_info          Dump headers from an application image
+    make_image          Create an application image from binary files
+    elf2image           Create an application image from ELF file
+    read_mac            Read MAC address from OTP ROM
+    chip_id             Read Chip ID from OTP ROM
+    flash_id            Read SPI flash manufacturer and device ID
+    read_flash_status   Read SPI flash status register
+    write_flash_status  Write SPI flash status register
+    read_flash          Read SPI flash content
+    verify_flash        Verify a binary blob against flash
+    erase_flash         Perform Chip Erase on SPI flash
+    erase_region        Erase a region of the flash
+    version             Print esptool version
+    get_security_info   Get some security-related data
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --chip {auto,esp8266,esp32,esp32s2,esp32s3beta2,esp32c3}, -c {auto,esp8266,esp32,esp32s2,esp32s3beta2,esp32c3}
+                        Target chip type
+  --port PORT, -p PORT  Serial port device
+  --baud BAUD, -b BAUD  Serial port baud rate used when flashing/reading
+  --before {default_reset,no_reset,no_reset_no_sync}
+                        What to do before connecting to the chip
+  --after {hard_reset,soft_reset,no_reset}, -a {hard_reset,soft_reset,no_reset}
+                        What to do after esptool.py is finished
+  --no-stub             Disable launching the flasher stub, only talk to ROM
+                        bootloader. Some features will not be available.
+  --trace, -t           Enable trace-level output of esptool.py interactions.
+  --override-vddsdio [{1.8V,1.9V,OFF}]
+                        Override ESP32 VDDSDIO internal voltage regulator (use
+                        with care)
+  --connect-attempts CONNECT_ATTEMPTS
+                        Number of attempts to connect, negative or 0 for
+                        infinite. Default: 7.
+#+end_example
+
+* Flash the firmware
+
+** Prepare the hardware
+
+The Sonoff TH16 switch uses a ESP8266 chip which requires 3.3V power from my FTDI USB chip adapter,
+an [[https://learn.adafruit.com/ftdi-friend][Adafruit FTDI Friend]]. This adapter first required that I cut a trace on the backside of the
+breakout board and solder together two pads to make the chip output 3.3V. This is easily done with
+a very sharp knife and a standard soldering iron.
+
+I next soldered a five pin header directly onto the Sonoff board in the holes that were already
+present. This allowed me to connect the FTDI adapter to the TH16 with jumper wires.
+
+*Before connecting anything, I ensured that the switch was not connected to the mains power.* I
+also ensured that the FTDI adapter was not connected to my laptop.
+
+I connected the FTDI adapter to the switch in the following manner:
+
+|-------------+-------------+--------------|
+| FTDI Friend | Sonoff TH16 | Jumper color |
+|-------------+-------------+--------------|
+| Vcc         | Vcc         | Orange       |
+| Gnd         | Gnd         | Green        |
+| Tx          | E-Rx        | Blue         |
+| Rx          | E-Tx        | Yellow       |
+|-------------+-------------+--------------|
+
+** Boot the chip in programming mode
+
+To boot the chip in programming mode, I pressed and held the button on the switch and then plugged
+the FTDI adapter into the USB port on my laptop. After a second or two, I released the button.
+
+Immediately after doing this, I ran =dmesg= to find the name of the USB device file.
+
+#+BEGIN_SRC sh
+dmesg | tail -n 6
+#+END_SRC
+
+#+begin_example
+[ 3620.942230] usb 1-1: Product: FT232R USB UART
+[ 3620.942231] usb 1-1: Manufacturer: FTDI
+[ 3620.942231] usb 1-1: SerialNumber: AC013WV8
+[ 3620.945651] ftdi_sio 1-1:1.0: FTDI USB Serial Device converter detected
+[ 3620.945678] usb 1-1: Detected FT232RL
+[ 3620.946104] usb 1-1: FTDI USB Serial Device converter now attached to ttyUSB0              
+#+end_example
+
+From the above output, I could infer that the filename was =ttyUSB0=. The device file is located in
+=/dev=:
+
+#+BEGIN_SRC sh
+ls /dev | grep ttyUSB0
+#+END_SRC
+
+#+BEGIN_EXAMPLE
+: ttyUSB0
+#+END_EXAMPLE
+
+Finally, I verified that the FTDI adapter could talk to the switch.
+
+#+BEGIN_SRC sh
+~/.venvs/esptool/bin/esptool.py -p /dev/ttyUSB0 read_mac
+#+END_SRC
+
+#+begin_example
+esptool.py v3.0
+Serial port /dev/ttyUSB0
+Connecting....
+Detecting chip type... ESP8266
+Chip is ESP8266EX
+Features: WiFi
+Crystal is 26MHz
+MAC: xx:xx:xx:xx:xx:xx
+Uploading stub...
+Running stub...
+Stub running...
+MAC: xx:xx:xx:xx:xx:xx
+Hard resetting via RTS pin...
+#+end_example
+
+** Backup the existing firmware
+
+*The switch needs to be placed back into programming mode after every esptool command. Unplug and
+replug the USB cable to do this.*
+
+I backed up the existing firmware using the =read_flash= esptool command.
+
+#+BEGIN_SRC sh :dir "~/opt/tasmota" :async
+~/.venvs/esptool/bin/esptool.py --port /dev/ttyUSB0 read_flash 0x00000 0x100000 fwbackup.bin
+#+END_SRC
+
+#+begin_example
+esptool.py v3.0
+Serial port /dev/ttyUSB0
+Connecting....
+Detecting chip type... ESP8266
+Chip is ESP8266EX
+Features: WiFi
+Crystal is 26MHz
+MAC: xx:xx:xx:xx:xx:xx
+Uploading stub...
+Running stub...
+Stub running...
+1048576 (100 %)
+1048576 (100 %)
+Read 1048576 bytes at 0x0 in 98.7 seconds (85.0 kbit/s)...
+Hard resetting via RTS pin...
+#+end_example
+
+I next verified that the backup was made:
+
+#+BEGIN_SRC sh
+ls -lh ~/opt/tasmota
+#+END_SRC
+
+#+BEGIN_EXAMPLE
+: total 1.6M
+: -rw-r--r-- 1 kmdouglass kmdouglass 1.0M Dez 21 11:37 fwbackup.bin
+: -rw-r--r-- 1 kmdouglass kmdouglass 587K Dez 17 12:34 tasmota.bin
+#+END_EXAMPLE
+
+** Erase the existing firmware
+
+This was performed with the command:
+
+#+BEGIN_SRC sh :async
+~/.venvs/esptool/bin/esptool.py --port /dev/ttyUSB0 erase_flash
+#+END_SRC
+
+#+begin_example
+esptool.py v3.0
+Serial port /dev/ttyUSB0
+Connecting....
+Detecting chip type... ESP8266
+Chip is ESP8266EX
+Features: WiFi
+Crystal is 26MHz
+MAC: xx:xx:xx:xx:xx:xx
+Uploading stub...
+Running stub...
+Stub running...
+Erasing flash (this may take a while)...
+Chip erase completed successfully in 4.1s
+Hard resetting via RTS pin...
+#+end_example
+
+** Flash the new firmware
+
+#+BEGIN_SRC sh :dir "~/opt/tasmota" :async
+~/.venvs/esptool/bin/esptool.py --port /dev/ttyUSB0 write_flash -fs 1MB -fm dout 0x0 tasmota.bin
+#+END_SRC
+
+#+begin_example
+esptool.py v3.0
+Serial port /dev/ttyUSB0
+Connecting....
+Detecting chip type... ESP8266
+Chip is ESP8266EX
+Features: WiFi
+Crystal is 26MHz
+MAC: xx:xx:xx:xx:xx:xx
+Uploading stub...
+Running stub...
+Stub running...
+Configuring flash size...
+Compressed 601072 bytes to 429021...
+Writing at 0x00000000... (3 %)
+Writing at 0x00004000... (7 %)
+Writing at 0x00008000... (11 %)
+Writing at 0x0000c000... (14 %)
+Writing at 0x00010000... (18 %)
+Writing at 0x00014000... (22 %)
+Writing at 0x00018000... (25 %)
+Writing at 0x0001c000... (29 %)
+Writing at 0x00020000... (33 %)
+Writing at 0x00024000... (37 %)
+Writing at 0x00028000... (40 %)
+Writing at 0x0002c000... (44 %)
+Writing at 0x00030000... (48 %)
+Writing at 0x00034000... (51 %)
+Writing at 0x00038000... (55 %)
+Writing at 0x0003c000... (59 %)
+Writing at 0x00040000... (62 %)
+Writing at 0x00044000... (66 %)
+Writing at 0x00048000... (70 %)
+Writing at 0x0004c000... (74 %)
+Writing at 0x00050000... (77 %)
+Writing at 0x00054000... (81 %)
+Writing at 0x00058000... (85 %)
+Writing at 0x0005c000... (88 %)
+Writing at 0x00060000... (92 %)
+Writing at 0x00064000... (96 %)
+Writing at 0x00068000... (100 %)
+Wrote 601072 bytes (429021 compressed) at 0x00000000 in 37.7 seconds (effective 127.5 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
+#+end_example
+
+I then unplugged the switch from the USB adapter and plugged it back in.
+
+* Connect to the wireless network
+
+On my smartphone, I looked at the list of available wireless networks and found a network with a
+name that matched the template =tasmota_xxxxxx_####=. I connected to it, and then set the primary
+SSID to my homelab's wireless network, including the password.
+
+For the host name, I chose =dev-20201020-0=, where =dev= indicates that the switch is a device, the
+date is the date of purchase, and the final number indicates which device this is of multiple devices that were
+purchased on the same date.
+
+* Configure the temperature and humidity sensor
+
+I plugged in the sensor. This rebooted the switch. I then navigated to http://dev-20201020-0 in my
+web browser and selected /Configuration > Configure Module/. I selected =Sonoff TH (4)= from the
+=Module type= drop down menu for my Sonoff TH16. In the drop down menu for GPIO14, I selected my
+sensor type: =Si7021=. After clicking =Save=, the device rebooted. I had to do this twice for the
+settings to take effect.
