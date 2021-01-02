@@ -1,0 +1,198 @@
+#+TITLE: Mosquitto MQTT - Hello World
+#+AUTHOR: Kyle M. Douglass
+#+DATE: 2021-01-02
+#+OPTIONS: ^:nil
+#+PROPERTY: header-args :results output :exports both :eval never-export
+
+#+BEGIN_ABSTRACT
+I set up a Mosquitto MQTT broker and used Mosquitto's command line utilities to test the broker.
+#+END_ABSTRACT
+
+* Install Mosquitto
+
+** Install the Mosquitto MQTT broker and run it as a service
+
+To get started, I first installed Mosquitto onto my homelab's Raspberry Pi using nixops. The
+configuration file was simple:
+
+#+BEGIN_SRC
+{ config, ... }:
+
+{
+  networking.firewall.allowedTCPPorts = [ config.services.mosquitto.port ];
+
+  services.mosquitto = {
+    enable = true;
+    host = "0.0.0.0";
+
+    allowAnonymous = true;
+    users = {};
+
+    aclExtraConf = ''
+      topic readwrite #
+    '';
+  };
+}
+#+END_SRC
+
+I allowed anonymous access because the broker would be running on my private home network. I also
+made every topic readable and writable for anonymous users by setting the ACL extra
+configuration. (=#= is a wildcard for topics.) Without this setting, clients could subscribe and
+publish messages, but the messages would be transparently dropped and not actually sent between
+clients. The above module was added [[https://github.com/kmdouglass/homelab/blob/master/homelab.nix][to my homelab's network file]].
+
+I deployed the change to the Raspberry Pi using =nixops deploy -d homelab= as usual.
+
+Finally, I confirmed that the service was running:
+
+#+BEGIN_SRC sh
+ssh root@rpi3 systemctl status mosquitto.service
+#+END_SRC
+
+#+begin_example
+● mosquitto.service - Mosquitto MQTT Broker Daemon
+     Loaded: loaded (/nix/store/f227s0k58p05ycj9d10c3qsd6j45d0m9-unit-mosquitto.service/mosquitto.service; enabled; vendor preset: enabled)
+     Active: active (running) since Sat 2021-01-02 10:36:50 UTC; 46min ago
+    Process: 12161 ExecStartPre=/nix/store/plslcvjrqm22nkd5hxfi0qjg9bk44rv8-unit-script-mosquitto-pre-start/bin/mosquitto-pre-start (code=exited, status=0/SUCCESS)
+   Main PID: 12164 (mosquitto)
+         IP: 0B in, 0B out
+      Tasks: 1 (limit: 1021)
+     Memory: 1.6M
+        CPU: 364ms
+     CGroup: /system.slice/mosquitto.service
+             └─12164 /nix/store/860l1sk9ddmkpdrswqvq1rz6qq9fs9ky-mosquitto-1.6.11/bin/mosquitto -c /nix/store/swbn3ivx3kg2z4haz9b2lpkm059k3jma-mosquitto.conf
+
+Jan 02 10:36:50 rpi3 systemd[1]: Starting Mosquitto MQTT Broker Daemon...
+Jan 02 10:36:50 rpi3 mosquitto[12164]: 1609583810: mosquitto version 1.6.11 starting
+Jan 02 10:36:50 rpi3 mosquitto[12164]: 1609583810: Config loaded from /nix/store/swbn3ivx3kg2z4haz9b2lpkm059k3jma-mosquitto.conf.
+Jan 02 10:36:50 rpi3 mosquitto[12164]: 1609583810: Opening ipv4 listen socket on port 1883.
+Jan 02 10:36:50 rpi3 mosquitto[12164]: 1609583810: mosquitto version 1.6.11 running
+Jan 02 10:36:50 rpi3 systemd[1]: Started Mosquitto MQTT Broker Daemon.
+Jan 02 11:06:51 rpi3 mosquitto[12164]: 1609585611: Saving in-memory database to mosquitto.db.
+#+end_example
+
+** Install the Mosquitto client command line tools
+
+Next, I installed the Mosquitto client command line tools onto my laptop.
+
+#+BEGIN_SRC sh :results none :dir "/sudo::" :cache no
+apt update
+apt install -y mosquitto-clients
+#+END_SRC
+
+To confirm the installation, I queried the help menus for the =mosquitto_sub= command.
+
+#+BEGIN_SRC sh
+mosquitto_sub --help >&1
+echo
+#+END_SRC
+
+#+begin_example
+mosquitto_sub is a simple mqtt client that will subscribe to a single topic and print all messages it receives.
+mosquitto_sub version 1.4.15 running on libmosquitto 1.4.15.
+
+Usage: mosquitto_sub [-c] [-h host] [-k keepalive] [-p port] [-q qos] [-R] -t topic ...
+		     [-C msg_count] [-T filter_out]
+		     [-A bind_address] [-S]
+		     [-i id] [-I id_prefix]
+		     [-d] [-N] [--quiet] [-v]
+		     [-u username [-P password]]
+		     [--will-topic [--will-payload payload] [--will-qos qos] [--will-retain]]
+		     [{--cafile file | --capath dir} [--cert file] [--key file]
+		      [--ciphers ciphers] [--insecure]]
+		     [--psk hex-key --psk-identity identity [--ciphers ciphers]]
+		     [--proxy socks-url]
+       mosquitto_sub --help
+
+ -A : bind the outgoing socket to this host/ip address. Use to control which interface
+      the client communicates over.
+ -c : disable 'clean session' (store subscription and pending messages when client disconnects).
+ -C : disconnect and exit after receiving the 'msg_count' messages.
+ -d : enable debug messages.
+ -h : mqtt host to connect to. Defaults to localhost.
+ -i : id to use for this client. Defaults to mosquitto_sub_ appended with the process id.
+ -I : define the client id as id_prefix appended with the process id. Useful for when the
+      broker is using the clientid_prefixes option.
+ -k : keep alive in seconds for this client. Defaults to 60.
+ -N : do not add an end of line character when printing the payload.
+ -p : network port to connect to. Defaults to 1883.
+ -P : provide a password (requires MQTT 3.1 broker)
+ -q : quality of service level to use for the subscription. Defaults to 0.
+ -R : do not print stale messages (those with retain set).
+ -S : use SRV lookups to determine which host to connect to.
+ -t : mqtt topic to subscribe to. May be repeated multiple times.
+ -T : topic string to filter out of results. May be repeated.
+ -u : provide a username (requires MQTT 3.1 broker)
+ -v : print published messages verbosely.
+ -V : specify the version of the MQTT protocol to use when connecting.
+      Can be mqttv31 or mqttv311. Defaults to mqttv31.
+ --help : display this message.
+ --quiet : don't print error messages.
+ --will-payload : payload for the client Will, which is sent by the broker in case of
+		  unexpected disconnection. If not given and will-topic is set, a zero
+		  length message will be sent.
+ --will-qos : QoS level for the client Will.
+ --will-retain : if given, make the client Will retained.
+ --will-topic : the topic on which to publish the client Will.
+ --cafile : path to a file containing trusted CA certificates to enable encrypted
+	    certificate based communication.
+ --capath : path to a directory containing trusted CA certificates to enable encrypted
+	    communication.
+ --cert : client certificate for authentication, if required by server.
+ --key : client private key for authentication, if required by server.
+ --ciphers : openssl compatible list of TLS ciphers to support.
+ --tls-version : TLS protocol version, can be one of tlsv1.2 tlsv1.1 or tlsv1.
+		 Defaults to tlsv1.2 if available.
+ --insecure : do not check that the server certificate hostname matches the remote
+	      hostname. Using this option means that you cannot be sure that the
+	      remote host is the server you wish to connect to and so is insecure.
+	      Do not use this option in a production environment.
+ --psk : pre-shared-key in hexadecimal (no leading 0x) to enable TLS-PSK mode.
+ --psk-identity : client identity string for TLS-PSK mode.
+ --proxy : SOCKS5 proxy URL of the form:
+	   socks5h://[username[:password]@]hostname[:port]
+	   Only "none" and "username" authentication is supported.
+
+See http://mosquitto.org/ for more information.
+#+end_example
+
+
+* Subscribe to a topic and publish a message
+
+In a separate process, I subscribed to a topic called =test/topic= using =mosquitto_sub=:
+
+#+NAME: mosquitto-sub
+#+BEGIN_SRC elisp
+(start-process "mosquitto-sub" "mosquitto-sub" "mosquitto_sub" "-d" "-h" "rpi3" "-t" "test/topic")
+#+END_SRC
+
+#+RESULTS: mosquitto-sub
+
+=-d= tells the process to print debug messages, =-h rpi3= indicates the host name of the broker,
+and =-t testTopic= subscribes to the =testTopic= topic.
+
+I next used =mosquitto_pub= to publish a message to this topic.
+
+#+BEGIN_SRC sh
+mosquitto_pub -d -h rpi3 -t test/topic -m "Hello, world!"
+#+END_SRC
+
+#+BEGIN_EXAMPLE
+: Client mosqpub|28636-kmd-msi sending CONNECT
+: Client mosqpub|28636-kmd-msi received CONNACK
+: Client mosqpub|28636-kmd-msi sending PUBLISH (d0, q0, r0, m1, 'test/topic', ... (13 bytes))
+: Client mosqpub|28636-kmd-msi sending DISCONNECT
+#+END_EXAMPLE
+
+The following logs appeared from the process running the subscribed client, confirming that the
+message was correctly sent.
+
+#+BEGIN_EXAMPLE
+Client mosqsub|28146-kmd-msi sending CONNECT
+Client mosqsub|28146-kmd-msi received CONNACK
+Client mosqsub|28146-kmd-msi sending SUBSCRIBE (Mid: 1, Topic: test/topic, QoS: 0)
+Client mosqsub|28146-kmd-msi received SUBACK
+Subscribed (mid: 1): 0
+Client mosqsub|28146-kmd-msi received PUBLISH (d0, q0, r0, m0, 'test/topic', ... (13 bytes))
+Hello, world!
+#+END_EXAMPLE
